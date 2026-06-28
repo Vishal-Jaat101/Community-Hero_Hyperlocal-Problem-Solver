@@ -1,18 +1,21 @@
 @import "tailwindcss";
 @import "maplibre-gl/dist/maplibre-gl.css";
 
-body {
+html, body {
   margin: 0;
+  padding: 0;
+  height: 100vh;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background-color: #ffffff;
   color: #0f172a;
-  min-height: 100vh;
+  overflow: hidden;
 }
 
 #root {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* Custom scrollbars */
