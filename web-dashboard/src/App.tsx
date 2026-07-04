@@ -331,6 +331,24 @@ export default function App() {
     }
   }, [currentUser, isProfileOpen]);
 
+  // Dynamic calculation for Civic Reward Scheme values
+  const getRewardProgressAndClaimAmount = () => {
+    if (!currentUser) return { count: 0, progress: 0, claimed: 0 };
+    const dynamicVerifiedCount = reports.filter(
+      r => r.reporter_name === currentUser.name && (r.status === 'Verified' || r.status === 'Resolved')
+    ).length;
+
+    const mockCandidate = MOCK_REWARDED_CANDIDATES.find(c => c.name.toLowerCase() === currentUser.name.toLowerCase());
+    const mockVerified = mockCandidate ? mockCandidate.verifiedReports : 0;
+
+    const totalVerified = dynamicVerifiedCount + mockVerified;
+    const progress = totalVerified % 10;
+    const claimed = Math.floor(totalVerified / 10) * 1000;
+    return { count: totalVerified, progress, claimed };
+  };
+
+  const { progress: claimProgress, claimed: totalClaimed } = getRewardProgressAndClaimAmount();
+
   // --- Refs ---
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
@@ -847,9 +865,7 @@ export default function App() {
       },
       () => alert('Unable to retrieve your location. Please allow location access.')
     );
-  };
-
-  // --- Chatbot Handler (With Hindi & Nominatim Colony/City parser) ---
+  };  // --- Chatbot Handler (With Hindi & Nominatim Colony/City parser) ---
   const handleSendChatMessage = async (textToSend?: string) => {
     const text = textToSend || chatInput;
     if (!text.trim()) return;
@@ -860,27 +876,66 @@ export default function App() {
     // Wait a brief moment to simulate processing
     setTimeout(async () => {
       const isHi = chatbotLanguage === 'HI';
+      const coordsRegex = /(-?\d+\.\d+),\s*(-?\d+\.\d+)/;
 
+      // 1. Check if user is sharing/attaching location coordinates when not expected
+      if (text.includes('📍') || text.match(coordsRegex)) {
+        if (chatStep !== 3) {
+          const match = text.match(coordsRegex);
+          if (match) {
+            const latVal = parseFloat(match[1]);
+            const lonVal = parseFloat(match[2]);
+            
+            if (!isWithinIndia(latVal, lonVal)) {
+              const outOfIndiaMsg = isHi
+                ? `📍 स्थान भारत से बाहर है (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})। हम केवल भारत के भीतर की समस्याओं का समर्थन करते हैं।`
+                : `📍 Captured location is outside India (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}). We only support issues within India.`;
+              setChatMessages(prev => [...prev, { sender: 'bot', text: outOfIndiaMsg }]);
+              return;
+            }
+
+            setChatDraftReport(prev => ({ ...prev, latitude: latVal, longitude: lonVal }));
+            const responseText = isHi
+              ? `📍 स्थान दर्ज कर लिया गया है (${latVal.toFixed(4)}, ${lonVal.toFixed(4)})। कृपया पहले समस्या का विवरण दें:`
+              : `📍 Location captured (${latVal.toFixed(4)}, ${lonVal.toFixed(4)}). Please describe the issue you want to report first:`;
+            setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+            return;
+          }
+        }
+      }
+
+      // 2. Chatbot Dialog State Machine
       if (chatStep === 0) {
-        // Step 0: Handle initial description
+        // Step 0: Check for greeting or random chat
+        const lowerText = text.toLowerCase().trim();
+        const greetings = ['hello', 'hi', 'hey', 'hlo', 'hola', 'नमस्ते', 'नमस्कार', 'namaste', 'helo', 'hlo!'];
+        if (greetings.includes(lowerText) || lowerText.startsWith('hlo')) {
+          const responseText = isHi
+            ? `नमस्ते! मैं आपका नागरिक सहायक हूँ। आप किस hyperlocal समस्या (जैसे सड़क का गड्ढा, कचरा, पानी का रिसाव) की रिपोर्ट करना चाहते हैं? कृपया विवरण दें।`
+            : `Hello! I am your Civic Assistant. What hyperlocal problem (e.g. pothole, waste, water leak) would you like to report? Please describe it.`;
+          setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+          return;
+        }
+
+        // Guesses the category
         let guessedCategory = 'Other';
-        const lowerText = text.toLowerCase();
-        if (lowerText.includes('pothole') || lowerText.includes('road') || lowerText.includes('gaddha') || lowerText.includes('road broken')) {
+        const lowerTextDesc = text.toLowerCase();
+        if (lowerTextDesc.includes('pothole') || lowerTextDesc.includes('road') || lowerTextDesc.includes('gaddha') || lowerTextDesc.includes('road broken')) {
           guessedCategory = 'Pothole';
-        } else if (lowerText.includes('garbage') || lowerText.includes('kuda') || lowerText.includes('trash') || lowerText.includes('waste')) {
+        } else if (lowerTextDesc.includes('garbage') || lowerTextDesc.includes('kuda') || lowerTextDesc.includes('trash') || lowerTextDesc.includes('waste')) {
           guessedCategory = 'Waste';
-        } else if (lowerText.includes('leak') || lowerText.includes('water') || lowerText.includes('pani') || lowerText.includes('pipe')) {
+        } else if (lowerTextDesc.includes('leak') || lowerTextDesc.includes('water') || lowerTextDesc.includes('pani') || lowerTextDesc.includes('pipe')) {
           guessedCategory = 'Water Leak';
-        } else if (lowerText.includes('broken') || lowerText.includes('light') || lowerText.includes('infrastructure')) {
+        } else if (lowerTextDesc.includes('broken') || lowerTextDesc.includes('light') || lowerTextDesc.includes('infrastructure')) {
           guessedCategory = 'Broken Infrastructure';
         }
 
-        setChatDraftReport({ description: text, category: guessedCategory });
+        setChatDraftReport(prev => ({ ...prev, description: text, category: guessedCategory }));
         setChatStep(1);
 
         const responseText = isHi
-          ? `मैंने विवरण नोट कर लिया है। मेरा अनुमान है कि श्रेणी "${guessedCategory}" है। क्या यह सही है या अन्य चुनें:`
-          : `I've noted the description. I guessed the category is "${guessedCategory}". Is that correct, or select another:`;
+          ? `मैंने विवरण नोट कर लिया है। मेरा अनुमान है कि श्रेणी "${guessedCategory}" है। क्या यह सही है या नीचे से चुनें:`
+          : `I've noted the description. I guessed the category is "${guessedCategory}". Is that correct, or select from below:`;
 
         setChatMessages(prev => [
           ...prev,
@@ -891,13 +946,33 @@ export default function App() {
           }
         ]);
       } else if (chatStep === 1) {
-        // Step 1: Category Confirmation
-        setChatDraftReport(prev => ({ ...prev, category: text }));
+        // Step 1: Category validation
+        const validCategories = ['pothole', 'waste', 'water leak', 'broken infrastructure', 'graffiti', 'other'];
+        const matchedCategory = validCategories.find(c => c === text.toLowerCase().trim() || text.toLowerCase().trim().includes(c));
+
+        if (!matchedCategory) {
+          const responseText = isHi
+            ? `कृपया समस्या का वर्गीकरण करने के लिए नीचे दिए गए विकल्पों में से एक वैध श्रेणी चुनें या टाइप करें:`
+            : `Please select a valid category from the options below or type it:`;
+          setChatMessages(prev => [
+            ...prev,
+            {
+              sender: 'bot',
+              text: responseText,
+              options: ['Pothole', 'Waste', 'Water Leak', 'Broken Infrastructure', 'Graffiti', 'Other']
+            }
+          ]);
+          return;
+        }
+
+        // Map text to clean category label
+        const categoryLabel = text.charAt(0).toUpperCase() + text.slice(1);
+        setChatDraftReport(prev => ({ ...prev, category: categoryLabel }));
         setChatStep(2);
 
         const responseText = isHi
-          ? `श्रेणी: ${text}। गंभीरता का स्तर क्या है?`
-          : `Category: ${text}. What is the severity level?`;
+          ? `श्रेणी: ${categoryLabel}। गंभीरता का स्तर क्या है?`
+          : `Category: ${categoryLabel}. What is the severity level?`;
 
         setChatMessages(prev => [
           ...prev,
@@ -908,23 +983,48 @@ export default function App() {
           }
         ]);
       } else if (chatStep === 2) {
-        // Step 2: Severity level
+        // Step 2: Severity validation
         const severityMapping: Record<string, string> = {
           'सामान्य (Minor)': 'Minor',
           'मध्यम (Medium)': 'Medium',
           'गंभीर (Severe)': 'Severe',
-          'Minor': 'Minor',
-          'Medium': 'Medium',
-          'Severe': 'Severe'
+          'minor': 'Minor',
+          'medium': 'Medium',
+          'severe': 'Severe'
         };
-        const mappedSeverity = severityMapping[text] || 'Medium';
+        
+        let mappedSeverity = null;
+        for (const [key, value] of Object.entries(severityMapping)) {
+          if (text.toLowerCase().trim().includes(key.toLowerCase())) {
+            mappedSeverity = value;
+            break;
+          }
+        }
+        if (!mappedSeverity) {
+          mappedSeverity = severityMapping[text] || null;
+        }
+
+        if (!mappedSeverity) {
+          const responseText = isHi
+            ? `कृपया एक वैध गंभीरता स्तर (Minor, Medium, Severe) चुनें:`
+            : `Please select or type a valid severity level (Minor, Medium, or Severe):`;
+          setChatMessages(prev => [
+            ...prev,
+            {
+              sender: 'bot',
+              text: responseText,
+              options: isHi ? ['सामान्य (Minor)', 'मध्यम (Medium)', 'गंभीर (Severe)'] : ['Minor', 'Medium', 'Severe']
+            }
+          ]);
+          return;
+        }
 
         setChatDraftReport(prev => ({ ...prev, severity: mappedSeverity }));
         setChatStep(3);
 
         const responseText = isHi
-          ? `स्थान दर्ज करें। कृपया शहर और कॉलोनी का नाम बताएं (जैसे: Bharatpur, Subhash Nagar):`
-          : `Please enter the location. Provide the City and Colony/Area name (e.g., Bharatpur, Subhash Nagar):`;
+          ? `स्थान दर्ज करें। कृपया शहर और कॉलोनी का नाम बताएं (जैसे: Bharatpur, Subhash Nagar) या '📍 लाइव स्थान साझा करें' बटन पर क्लिक करें:`
+          : `Please enter the location. Provide the City and Colony/Area name (e.g., Bharatpur, Subhash Nagar) or click '📍 Attach Live Location':`;
 
         setChatMessages(prev => [
           ...prev,
@@ -934,28 +1034,56 @@ export default function App() {
           }
         ]);
       } else if (chatStep === 3) {
-        // Step 3: Location resolution using Nominatim Geocoding API
-        const locationQuery = text;
+        // Step 3: Location resolution
         let lat = 28.6139;
         let lon = 77.2090;
+        let locationQuery = text;
+        let isCoordsParsed = false;
 
-        const loadingMsg = isHi
-          ? `स्थान "${locationQuery}" को खोजा जा रहा है...`
-          : `Resolving location coordinates for "${locationQuery}"...`;
+        const match = text.match(coordsRegex);
+        if (match) {
+          lat = parseFloat(match[1]);
+          lon = parseFloat(match[2]);
+          locationQuery = `Coordinates (${lat.toFixed(5)}, ${lon.toFixed(5)})`;
+          isCoordsParsed = true;
+        }
 
-        setChatMessages(prev => [...prev, { sender: 'bot', text: loadingMsg }]);
+        // If coordinates were already captured in draft location share
+        if (!isCoordsParsed && chatDraftReport.latitude && chatDraftReport.longitude) {
+          lat = chatDraftReport.latitude;
+          lon = chatDraftReport.longitude;
+          locationQuery = `Coordinates (${lat.toFixed(5)}, ${lon.toFixed(5)})`;
+          isCoordsParsed = true;
+        }
 
-        try {
-          const response = await fetch(
-            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationQuery)}&countrycodes=in&limit=1`
-          );
-          const results = await response.json();
-          if (results && results.length > 0) {
-            lat = parseFloat(results[0].lat);
-            lon = parseFloat(results[0].lon);
+        if (!isCoordsParsed) {
+          const loadingMsg = isHi
+            ? `स्थान "${locationQuery}" को खोजा जा रहा है...`
+            : `Resolving location coordinates for "${locationQuery}"...`;
+
+          setChatMessages(prev => [...prev, { sender: 'bot', text: loadingMsg }]);
+
+          try {
+            const response = await fetch(
+              `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationQuery)}&countrycodes=in&limit=1`
+            );
+            const results = await response.json();
+            if (results && results.length > 0) {
+              lat = parseFloat(results[0].lat);
+              lon = parseFloat(results[0].lon);
+            }
+          } catch (err) {
+            console.error('OSM Geocoding failed inside chatbot', err);
           }
-        } catch (err) {
-          console.error('OSM Geocoding failed inside chatbot', err);
+        }
+
+        // Validate coordinates are in India
+        if (!isWithinIndia(lat, lon)) {
+          const failText = isHi
+            ? `क्षमा करें, हम केवल भारत के भीतर की समस्याओं का समर्थन करते हैं। कृपया भारत में एक वैध स्थान प्रदान करें:`
+            : `Sorry, we only support civic issues within India. Please provide a valid location in India:`;
+          setChatMessages(prev => [...prev, { sender: 'bot', text: failText }]);
+          return;
         }
 
         const newReport: IssueReport = {
@@ -971,7 +1099,8 @@ export default function App() {
           downvotes: 0,
           created_at: new Date().toISOString(),
           description: chatDraftReport.description || '',
-          colony_area: locationQuery,
+          colony_area: locationQuery.replace(/📍/g, '').trim(),
+          reporter_name: currentUser?.name || 'citizen',
           comments: []
         };
 
@@ -994,7 +1123,6 @@ export default function App() {
       }
     }, 600);
   };
-
   // ==========================================
   // RENDER: Auth Screen (if not logged in)
   // ==========================================
@@ -2036,17 +2164,17 @@ export default function App() {
                     </p>
                     <div className="pt-2">
                       <div className="flex justify-between items-center text-[10px] font-extrabold uppercase text-zinc-400 mb-1.5">
-                        <span>Your Claim Progress: 6 / 10 Reports</span>
+                        <span>Your Claim Progress: {claimProgress} / 10 Reports</span>
                         <span className="text-amber-400">₹1,000 Target</span>
                       </div>
                       <div className="h-3 w-full bg-zinc-850 rounded-full overflow-hidden border border-zinc-700">
-                        <div className="h-full bg-amber-400 rounded-full" style={{ width: '60%' }} />
+                        <div className="h-full bg-amber-400 rounded-full" style={{ width: `${claimProgress * 10}%` }} />
                       </div>
                     </div>
                   </div>
                   <div className="bg-zinc-800 border border-zinc-700 px-5 py-4 rounded-2xl text-center flex flex-col justify-center min-w-[140px] flex-shrink-0">
                     <span className="text-[10px] text-zinc-400 uppercase font-black tracking-wider">Total Claimed</span>
-                    <span className="text-xl font-black text-white mt-0.5">₹2,000</span>
+                    <span className="text-xl font-black text-white mt-0.5">₹{totalClaimed.toLocaleString()}</span>
                     <span className="text-[8px] text-emerald-450 font-bold uppercase mt-1">Next: ₹1,000</span>
                   </div>
                 </div>
