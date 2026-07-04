@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Gemini API Keys Config
+src/config/geminiKeys.ts

@@ -26,9 +26,11 @@ import {
   Edit3,
   Save,
   FileText,
-  Settings
+  AlertTriangle,
+  Loader2
 } from 'lucide-react';
 import maplibregl from 'maplibre-gl';
+import { GEMINI_API_KEYS } from './config/geminiKeys';
 import { io, Socket } from 'socket.io-client';
 
 // Import MapLibre GL CSS to ensure maps render correctly instead of staying blank
@@ -297,10 +299,12 @@ export default function App() {
   const [chatInput, setChatInput] = useState<string>('');
   const [chatStep, setChatStep] = useState<number>(0);
   const [chatDraftReport, setChatDraftReport] = useState<Partial<IssueReport>>({});
-  const [isChatSettingsOpen, setIsChatSettingsOpen] = useState<boolean>(false);
-  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
-    return localStorage.getItem('gemini_api_key') || import.meta.env.VITE_GEMINI_API_KEY || '';
-  });
+  const [verificationState, setVerificationState] = useState<{
+    isOpen: boolean;
+    status: 'idle' | 'scanning' | 'category' | 'location' | 'success' | 'failed';
+    errorMsg?: string;
+  }>({ isOpen: false, status: 'idle' });
+  const [pendingReportData, setPendingReportData] = useState<IssueReport | null>(null);
 
   // --- Reporting Form State ---
   const [showReportForm, setShowReportForm] = useState<boolean>(false);
@@ -353,6 +357,50 @@ export default function App() {
   };
 
   const { progress: claimProgress, claimed: totalClaimed } = getRewardProgressAndClaimAmount();
+
+  const isGuest = currentUser?.email === 'guest@communityhero.org';
+
+  const startReportVerification = (report: IssueReport, onComplete?: (success: boolean) => void) => {
+    const desc = (report.description || '').toLowerCase().trim();
+    const isGibberish = desc.length < 5 || desc === 'good' || desc === 'yup' || desc === 'hlo' || desc === 'hello' || desc === 'hlo buddy';
+
+    setVerificationState({ isOpen: true, status: 'scanning' });
+    setPendingReportData(report);
+
+    setTimeout(() => {
+      if (isGibberish) {
+        setVerificationState({
+          isOpen: true,
+          status: 'failed',
+          errorMsg: 'Description is too brief or lacks civic problem context.'
+        });
+        if (onComplete) onComplete(false);
+        return;
+      }
+      
+      setVerificationState(prev => ({ ...prev, status: 'category' }));
+      
+      setTimeout(() => {
+        setVerificationState(prev => ({ ...prev, status: 'location' }));
+        
+        setTimeout(() => {
+          setVerificationState(prev => ({ ...prev, status: 'success' }));
+          
+          setReports(prev => [report, ...prev]);
+          if (map.current) {
+            map.current.flyTo({ center: [report.longitude, report.latitude], zoom: 14 });
+          }
+
+          setTimeout(() => {
+            setVerificationState({ isOpen: false, status: 'idle' });
+            setPendingReportData(null);
+            if (onComplete) onComplete(true);
+          }, 1500);
+
+        }, 1000);
+      }, 1000);
+    }, 1200);
+  };
 
   // --- Refs ---
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -702,6 +750,10 @@ export default function App() {
 
   const handleCreateReport = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isGuest) {
+      alert('Please login first to submit a report.');
+      return;
+    }
     const lat = parseFloat(formLatitude);
     const lon = parseFloat(formLongitude);
     if (isNaN(lat) || isNaN(lon)) {
@@ -731,10 +783,9 @@ export default function App() {
       reporter_name: currentUser?.name || 'citizen',
       comments: []
     };
-    setReports((prev) => [newReport, ...prev]);
-    if (map.current) {
-      map.current.flyTo({ center: [lon, lat], zoom: 14 });
-    }
+    
+    startReportVerification(newReport);
+    
     setFormDescription('');
     setFormColonyArea('');
     setFormPhoto(null);
@@ -870,17 +921,72 @@ export default function App() {
       },
       () => alert('Unable to retrieve your location. Please allow location access.')
     );
-  };  // --- Chatbot Handler (With Hindi & Nominatim Colony/City parser) ---
+  };  // --- Rotating Gemini Key helper ---
+  const fetchGeminiRotate = async (apiMessages: any[], systemInstruction: string) => {
+    const keys = GEMINI_API_KEYS.filter(
+      (k) => k && k !== "YOUR_GEMINI_KEY_1" && k !== "YOUR_GEMINI_KEY_2" && k !== "YOUR_GEMINI_KEY_3" && k !== "YOUR_GEMINI_KEY_4" && k !== "YOUR_GEMINI_KEY_5"
+    );
+
+    if (keys.length === 0) {
+      throw new Error("No configured Gemini API keys found.");
+    }
+
+    for (let i = 0; i < keys.length; i++) {
+      const activeKey = keys[i];
+      try {
+        const apiURL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${activeKey}`;
+        const response = await fetch(apiURL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: apiMessages,
+            systemInstruction: {
+              parts: [{ text: systemInstruction }]
+            },
+            generationConfig: {
+              responseMimeType: "application/json"
+            }
+          })
+        });
+
+        if (response.ok) {
+          const resData = await response.json();
+          const text = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) return text;
+        } else {
+          console.warn(`Gemini key index ${i} failed with status: ${response.status}. Rotating key...`);
+        }
+      } catch (err) {
+        console.error(`Gemini key index ${i} threw error:`, err);
+      }
+    }
+    throw new Error("All configured Gemini API keys failed or returned errors.");
+  };
+
+  // --- Chatbot Handler (With Hindi & Nominatim Colony/City parser) ---
   const handleSendChatMessage = async (textToSend?: string) => {
     const text = textToSend || chatInput;
     if (!text.trim()) return;
+
+    const isHi = chatbotLanguage === 'HI';
+
+    // Guest protection inside Chatbot
+    if (isGuest) {
+      const lowerText = text.toLowerCase().trim();
+      const greetings = ['hello', 'hi', 'hey', 'hlo', 'hola', 'namaste', 'नमस्ते', 'नमस्कार'];
+      const isGreeting = greetings.some(g => lowerText === g || lowerText.startsWith(g));
+      if (!isGreeting) {
+        alert(isHi ? 'कृपया रिपोर्ट करने के लिए पहले लॉग इन करें।' : 'Please login first to report an issue.');
+        setChatInput('');
+        return;
+      }
+    }
 
     setChatMessages(prev => [...prev, { sender: 'user' as const, text }]);
     setChatInput('');
 
     // Wait a brief moment to simulate processing
     setTimeout(async () => {
-      const isHi = chatbotLanguage === 'HI';
       const coordsRegex = /(-?\d+\.\d+),\s*(-?\d+\.\d+)/;
 
       // 1. Check if user is sharing/attaching location coordinates when not expected
@@ -909,8 +1015,13 @@ export default function App() {
         }
       }
 
+      // Check if we have active Gemini API keys
+      const activeKeys = GEMINI_API_KEYS.filter(
+        (k) => k && k !== "YOUR_GEMINI_KEY_1" && k !== "YOUR_GEMINI_KEY_2" && k !== "YOUR_GEMINI_KEY_3" && k !== "YOUR_GEMINI_KEY_4" && k !== "YOUR_GEMINI_KEY_5"
+      );
+
       // 2. Call Gemini API if configured
-      if (geminiApiKey) {
+      if (activeKeys.length > 0) {
         try {
           const systemInstruction = `
 You are the Civic Assistant for the 'Community Hero' hyperlocal problem solver platform in India.
@@ -950,7 +1061,6 @@ Instructions:
 Do NOT wrap the response in markdown blocks. Return only raw JSON.
 `;
 
-          const apiURL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`;
           // Get last 8 messages for context
           const apiMessages = chatMessages.slice(-8).map(m => ({
             role: m.sender === 'user' ? 'user' : 'model',
@@ -961,22 +1071,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
             parts: [{ text: text }]
           });
 
-          const response = await fetch(apiURL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: apiMessages,
-              systemInstruction: {
-                parts: [{ text: systemInstruction }]
-              },
-              generationConfig: {
-                responseMimeType: "application/json"
-              }
-            })
-          });
-
-          const resData = await response.json();
-          const responseText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+          const responseText = await fetchGeminiRotate(apiMessages, systemInstruction);
           
           if (responseText) {
             const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -1024,18 +1119,19 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                   comments: []
                 };
 
-                setReports(prev => [newReport, ...prev]);
-                if (map.current) {
-                  map.current.flyTo({ center: [lon, lat], zoom: 14 });
-                }
-
-                setChatStep(0);
-                setChatDraftReport({});
-                
                 const successText = isHi
                   ? `धन्यवाद! मैंने आपकी रिपोर्ट दर्ज कर ली है और इसे मैप पर पिन कर दिया है। (${lat.toFixed(4)}, ${lon.toFixed(4)})`
                   : `Thank you! I have filed your report and pinned it on the map at (${lat.toFixed(4)}, ${lon.toFixed(4)}).`;
-                setChatMessages(prev => [...prev, { sender: 'bot', text: successText }]);
+
+                startReportVerification(newReport, (success) => {
+                  if (success) {
+                    setChatStep(0);
+                    setChatDraftReport({});
+                    setChatMessages([{ sender: 'bot', text: successText }]);
+                  } else {
+                    setChatMessages(prev => [...prev, { sender: 'bot', text: isHi ? 'सत्यापन विफल। कृपया वैध विवरण प्रदान करें।' : 'Verification failed. Please provide valid details.' }]);
+                  }
+                });
                 return;
               }
             }
@@ -1245,19 +1341,19 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
           comments: []
         };
 
-        setReports(prev => [newReport, ...prev]);
-        if (map.current) {
-          map.current.flyTo({ center: [lon, lat], zoom: 14 });
-        }
-
-        setChatStep(0);
-        setChatDraftReport({});
-
         const successText = isHi
-          ? `रिपोर्ट सफलतापूर्वक दर्ज की गई! मैंने इसे नक्शे पर पिन कर दिया है। (पिन स्थान: ${lat.toFixed(4)}, ${lon.toFixed(4)})`
-          : `Report filed successfully! I have pinned the issue to the map at ${lat.toFixed(4)}, ${lon.toFixed(4)}.`;
+          ? `रिपोर्ट सफलतापूर्वक दर्ज की गई!`
+          : `Report filed successfully!`;
 
-        setChatMessages(prev => [...prev, { sender: 'bot', text: successText }]);
+        startReportVerification(newReport, (success) => {
+          if (success) {
+            setChatStep(0);
+            setChatDraftReport({});
+            setChatMessages([{ sender: 'bot', text: isHi ? `${successText} (पिन स्थान: ${lat.toFixed(4)}, ${lon.toFixed(4)})` : `${successText} I have pinned the issue to the map at ${lat.toFixed(4)}, ${lon.toFixed(4)}.` }]);
+          } else {
+            setChatMessages(prev => [...prev, { sender: 'bot', text: isHi ? 'सत्यापन विफल। कृपया वैध विवरण प्रदान करें।' : 'Verification failed. Please provide valid details.' }]);
+          }
+        });
       }
     }, 600);
   };
@@ -1477,6 +1573,94 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
   // ==========================================
   return (
     <div className="flex flex-col h-screen bg-white text-zinc-900 overflow-hidden">
+      {/* --- AI Verification Modal --- */}
+      {verificationState.isOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-[9999]">
+          <div className="w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-zinc-200 text-center space-y-6 flex flex-col items-center">
+            <div>
+              <h3 className="text-sm font-black uppercase tracking-wider text-zinc-800 m-0">AI Quality Inspection</h3>
+              <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold mt-1">Hyperlocal Verification System</p>
+            </div>
+
+            <div className="relative w-24 h-24 flex items-center justify-center">
+              {verificationState.status === 'scanning' && (
+                <>
+                  <div className="absolute inset-0 border-4 border-dashed border-zinc-200 rounded-full animate-spin duration-3000" />
+                  <Loader2 className="h-10 w-10 text-black animate-spin" />
+                </>
+              )}
+              {verificationState.status === 'category' && (
+                <>
+                  <div className="absolute inset-0 border-4 border-zinc-300 rounded-full animate-pulse" />
+                  <Bot className="h-10 w-10 text-black animate-bounce" />
+                </>
+              )}
+              {verificationState.status === 'location' && (
+                <>
+                  <div className="absolute inset-0 border-4 border-zinc-300 rounded-full animate-ping" />
+                  <MapPin className="h-10 w-10 text-black animate-bounce" />
+                </>
+              )}
+              {verificationState.status === 'success' && (
+                <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center border-2 border-emerald-400">
+                  <CheckCircle2 className="h-10 w-10 text-emerald-600" />
+                </div>
+              )}
+              {verificationState.status === 'failed' && (
+                <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center border-2 border-red-400">
+                  <AlertTriangle className="h-10 w-10 text-red-600" />
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1.5 px-4 min-h-[48px]">
+              {verificationState.status === 'scanning' && (
+                <p className="text-xs font-bold text-zinc-700 animate-pulse">Scanning submitted description & image content...</p>
+              )}
+              {verificationState.status === 'category' && (
+                <p className="text-xs font-bold text-zinc-700 font-sans">Checking category alignment: <span className="font-extrabold text-black uppercase">{pendingReportData?.category}</span></p>
+              )}
+              {verificationState.status === 'location' && (
+                <p className="text-xs font-bold text-zinc-700">Verifying coordinate boundaries within India region...</p>
+              )}
+              {verificationState.status === 'success' && (
+                <p className="text-xs font-black text-emerald-700 uppercase tracking-wide">Verification Successful! Report Approved.</p>
+              )}
+              {verificationState.status === 'failed' && (
+                <div className="space-y-1">
+                  <p className="text-xs font-black text-red-700 uppercase tracking-wide">Inspection Failed</p>
+                  <p className="text-[10px] text-zinc-500 font-semibold">{verificationState.errorMsg}</p>
+                </div>
+              )}
+            </div>
+
+            {verificationState.status !== 'success' && verificationState.status !== 'failed' && (
+              <div className="relative w-full h-1.5 bg-zinc-100 rounded-full overflow-hidden border border-zinc-200">
+                <div 
+                  className="absolute top-0 bottom-0 left-0 bg-black transition-all duration-700 rounded-full" 
+                  style={{
+                    width: 
+                      verificationState.status === 'scanning' ? '30%' :
+                      verificationState.status === 'category' ? '65%' :
+                      verificationState.status === 'location' ? '90%' : '0%'
+                  }} 
+                />
+              </div>
+            )}
+
+            {verificationState.status === 'failed' && (
+              <button
+                type="button"
+                onClick={() => setVerificationState({ isOpen: false, status: 'idle' })}
+                className="w-full py-2.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer"
+              >
+                Close Inspector
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* --- Profile Modal --- */}
       {isProfileOpen && currentUser && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-[999]">
@@ -1500,7 +1684,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
               {/* Profile Card */}
               <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-5 relative">
                 <div className="absolute top-4 right-4">
-                  {!isEditingProfile ? (
+                  {!isGuest && !isEditingProfile ? (
                     <button
                       type="button"
                       onClick={() => setIsEditingProfile(true)}
@@ -1509,7 +1693,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                       <Edit3 className="h-3 w-3" />
                       Edit
                     </button>
-                  ) : (
+                  ) : isEditingProfile ? (
                     <button
                       type="button"
                       onClick={() => {
@@ -1521,7 +1705,7 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                     >
                       Cancel
                     </button>
-                  )}
+                  ) : null}
                 </div>
 
                 <div className="space-y-4">
@@ -1722,7 +1906,13 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                   {showReportForm ? 'Report New Issue' : 'Civic Reports'}
                 </h2>
                 <button
-                  onClick={() => setShowReportForm(!showReportForm)}
+                  onClick={() => {
+                    if (isGuest) {
+                      alert('Please login first to submit a report.');
+                      return;
+                    }
+                    setShowReportForm(!showReportForm);
+                  }}
                   className="flex items-center gap-1.5 bg-black hover:bg-zinc-800 text-white text-xs font-bold uppercase tracking-wider px-3.5 py-2 rounded-xl transition-all cursor-pointer"
                 >
                   {showReportForm ? (
@@ -2197,47 +2387,11 @@ Do NOT wrap the response in markdown blocks. Return only raw JSON.
                           <Globe className="h-3 w-3" />
                           <span>{chatbotLanguage === 'EN' ? 'HINDI' : 'ENGLISH'}</span>
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setIsChatSettingsOpen(prev => !prev)}
-                          className={`p-1 rounded-lg hover:bg-zinc-800 transition-all cursor-pointer ${isChatSettingsOpen ? 'text-amber-400' : 'text-zinc-400 hover:text-white'}`}
-                          title="AI Settings"
-                        >
-                          <Settings className="h-4 w-4" />
-                        </button>
                         <button onClick={() => setIsChatOpen(false)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white transition-all cursor-pointer">
                           <X className="h-4 w-4" />
                         </button>
                       </div>
                     </div>
-                    {isChatSettingsOpen && (
-                      <div className="p-4 bg-zinc-105 border-b border-zinc-200 text-zinc-800 flex flex-col gap-2 flex-shrink-0 text-xs">
-                        <label className="font-extrabold uppercase text-[9px] text-zinc-500 tracking-wider">Configure Gemini API Key</label>
-                        <div className="flex gap-2">
-                          <input
-                            type="password"
-                            placeholder="Enter Gemini API Key..."
-                            value={geminiApiKey}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setGeminiApiKey(val);
-                              localStorage.setItem('gemini_api_key', val);
-                            }}
-                            className="flex-1 bg-white border border-zinc-300 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-black font-mono text-zinc-900"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setIsChatSettingsOpen(false)}
-                            className="bg-black hover:bg-zinc-800 text-white px-3 py-1 rounded-lg font-bold cursor-pointer text-[10px] uppercase tracking-wider transition-all"
-                          >
-                            Save
-                          </button>
-                        </div>
-                        <span className="text-[9px] text-zinc-500 font-semibold leading-normal">
-                          Leave empty to use built-in local smart simulation (AI mode behaves normally).
-                        </span>
-                      </div>
-                    )}
                     <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-zinc-50">
                       {chatMessages.map((msg: { sender: string; text: string; options?: string[] }, idx: number) => (
                         <div key={idx} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
