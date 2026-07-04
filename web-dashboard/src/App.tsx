@@ -25,7 +25,8 @@ import {
   Gift,
   Edit3,
   Save,
-  FileText
+  FileText,
+  Settings
 } from 'lucide-react';
 import maplibregl from 'maplibre-gl';
 import { io, Socket } from 'socket.io-client';
@@ -296,6 +297,10 @@ export default function App() {
   const [chatInput, setChatInput] = useState<string>('');
   const [chatStep, setChatStep] = useState<number>(0);
   const [chatDraftReport, setChatDraftReport] = useState<Partial<IssueReport>>({});
+  const [isChatSettingsOpen, setIsChatSettingsOpen] = useState<boolean>(false);
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    return localStorage.getItem('gemini_api_key') || import.meta.env.VITE_GEMINI_API_KEY || '';
+  });
 
   // --- Reporting Form State ---
   const [showReportForm, setShowReportForm] = useState<boolean>(false);
@@ -904,183 +909,319 @@ export default function App() {
         }
       }
 
-      // 2. Chatbot Dialog State Machine
-      if (chatStep === 0) {
-        // Step 0: Check for greeting or random chat
-        const lowerText = text.toLowerCase().trim();
-        const greetings = ['hello', 'hi', 'hey', 'hlo', 'hola', 'नमस्ते', 'नमस्कार', 'namaste', 'helo', 'hlo!'];
-        if (greetings.includes(lowerText) || lowerText.startsWith('hlo')) {
-          const responseText = isHi
-            ? `नमस्ते! मैं आपका नागरिक सहायक हूँ। आप किस hyperlocal समस्या (जैसे सड़क का गड्ढा, कचरा, पानी का रिसाव) की रिपोर्ट करना चाहते हैं? कृपया विवरण दें।`
-            : `Hello! I am your Civic Assistant. What hyperlocal problem (e.g. pothole, waste, water leak) would you like to report? Please describe it.`;
-          setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
-          return;
-        }
+      // 2. Call Gemini API if configured
+      if (geminiApiKey) {
+        try {
+          const systemInstruction = `
+You are the Civic Assistant for the 'Community Hero' hyperlocal problem solver platform in India.
+Your job is to act as an intelligent AI assistant.
+You must ONLY discuss topics related to the Community Hero platform, civic issues, reporting problems (potholes, waste, water leak, infrastructure, etc.), urban improvements, and general engagement on this platform.
+Reject off-topic questions (e.g. general knowledge, math, general programming, other websites, general advice) politely. Example: "I am a Civic Assistant for Community Hero. I can only assist you with reporting or discussing local civic issues."
 
-        // Guesses the category
+Your goal is to converse with the user and collect the following fields to report a civic issue:
+1. category: MUST be one of: "Pothole", "Waste", "Water Leak", "Broken Infrastructure", "Graffiti", "Other".
+2. description: Details of the issue.
+3. severity: MUST be one of: "Minor", "Medium", "Severe". Default to "Medium" if unspecified.
+4. colony_area: Colony name or coordinates representation.
+
+Currently collected details from prior turns (use these to avoid asking duplicates):
+- Category: ${chatDraftReport.category || 'Not specified'}
+- Description: ${chatDraftReport.description || 'Not specified'}
+- Severity: ${chatDraftReport.severity || 'Not specified'}
+- Colony/Location: ${chatDraftReport.colony_area || (chatDraftReport.latitude ? chatDraftReport.latitude + ', ' + chatDraftReport.longitude : 'Not specified')}
+
+Instructions:
+1. Talk naturally. Be conversational. Respond to greetings and platform questions.
+2. If they are reporting an issue, look at what is missing and ask for it.
+3. If they shared location coords (e.g., '27.21793, 77.47152' or 'My location: 28.5, 77.2'), parse them.
+4. You MUST format your entire response as a single valid JSON object containing exactly these keys:
+{
+  "reply": "Your conversational message to the user",
+  "extractedInfo": {
+    "category": "Pothole" | "Waste" | "Water Leak" | "Broken Infrastructure" | "Graffiti" | "Other" | null,
+    "description": "description text" | null,
+    "severity": "Minor" | "Medium" | "Severe" | null,
+    "colony_area": "colony name" | null,
+    "latitude": number | null,
+    "longitude": number | null
+  },
+  "readyToSubmit": boolean
+}
+Do NOT wrap the response in markdown blocks. Return only raw JSON.
+`;
+
+          const apiURL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiApiKey}`;
+          // Get last 8 messages for context
+          const apiMessages = chatMessages.slice(-8).map(m => ({
+            role: m.sender === 'user' ? 'user' : 'model',
+            parts: [{ text: m.text }]
+          }));
+          apiMessages.push({
+            role: 'user',
+            parts: [{ text: text }]
+          });
+
+          const response = await fetch(apiURL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: apiMessages,
+              systemInstruction: {
+                parts: [{ text: systemInstruction }]
+              },
+              generationConfig: {
+                responseMimeType: "application/json"
+              }
+            })
+          });
+
+          const resData = await response.json();
+          const responseText = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+          
+          if (responseText) {
+            const cleanJson = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+            const payload = JSON.parse(cleanJson);
+            
+            if (payload.extractedInfo) {
+              setChatDraftReport(prev => {
+                const updated = { ...prev };
+                if (payload.extractedInfo.category) updated.category = payload.extractedInfo.category;
+                if (payload.extractedInfo.description) updated.description = payload.extractedInfo.description;
+                if (payload.extractedInfo.severity) updated.severity = payload.extractedInfo.severity;
+                if (payload.extractedInfo.colony_area) updated.colony_area = payload.extractedInfo.colony_area;
+                if (payload.extractedInfo.latitude) updated.latitude = payload.extractedInfo.latitude;
+                if (payload.extractedInfo.longitude) updated.longitude = payload.extractedInfo.longitude;
+                return updated;
+              });
+            }
+
+            if (payload.readyToSubmit) {
+              const finalDraft = {
+                ...chatDraftReport,
+                ...payload.extractedInfo
+              };
+
+              let lat = finalDraft.latitude || 28.6139;
+              let lon = finalDraft.longitude || 77.2090;
+              let colArea = finalDraft.colony_area || 'Indiranagar, Bangalore';
+
+              if (isWithinIndia(lat, lon)) {
+                const newReport: IssueReport = {
+                  id: `report-${Date.now()}`,
+                  category: finalDraft.category || 'Other',
+                  severity: finalDraft.severity || 'Medium',
+                  status: 'Reported',
+                  latitude: lat,
+                  longitude: lon,
+                  original_media_url: 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
+                  s3_media_url: 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80',
+                  upvotes: 1,
+                  downvotes: 0,
+                  created_at: new Date().toISOString(),
+                  description: finalDraft.description || '',
+                  colony_area: colArea,
+                  reporter_name: currentUser?.name || 'citizen',
+                  comments: []
+                };
+
+                setReports(prev => [newReport, ...prev]);
+                if (map.current) {
+                  map.current.flyTo({ center: [lon, lat], zoom: 14 });
+                }
+
+                setChatStep(0);
+                setChatDraftReport({});
+                
+                const successText = isHi
+                  ? `धन्यवाद! मैंने आपकी रिपोर्ट दर्ज कर ली है और इसे मैप पर पिन कर दिया है। (${lat.toFixed(4)}, ${lon.toFixed(4)})`
+                  : `Thank you! I have filed your report and pinned it on the map at (${lat.toFixed(4)}, ${lon.toFixed(4)}).`;
+                setChatMessages(prev => [...prev, { sender: 'bot', text: successText }]);
+                return;
+              }
+            }
+
+            setChatMessages(prev => [...prev, { sender: 'bot', text: payload.reply }]);
+            return;
+          }
+        } catch (apiErr) {
+          console.error("Gemini API call failed, falling back to local simulation", apiErr);
+        }
+      }
+
+      // 3. Fallback Local AI Simulation
+      const lowerText = text.toLowerCase().trim();
+      const isOffTopic = (t: string) => {
+        const offTopicKeywords = [
+          'joke', 'code', 'python', 'javascript', 'html', 'css', 'math', 'calculator', 'science',
+          'weather', 'news', 'recipe', 'game', 'play', 'movie', 'song', 'spotify', 'facebook',
+          'google', 'amazon', 'write a', 'how to write', 'sort an array', 'binary search', 'class'
+        ];
+        if (t.match(/\b(2\+2|5\+5|10\+10)\b/) || t.includes('+') || t.includes('-') || t.includes('*') || t.includes('/')) {
+          if (!t.includes('location') && !t.includes('coord')) return true;
+        }
+        return offTopicKeywords.some(keyword => t.includes(keyword));
+      };
+
+      if (isOffTopic(lowerText)) {
+        const offTopicText = isHi
+          ? `मैं केवल कम्युनिटी हीरो वेबसाइट और नागरिक समस्याओं (जैसे कचरा, गड्ढे, लीक) से संबंधित प्रश्नों का उत्तर दे सकता हूँ। कृपया केवल वही साझा करें!`
+          : `I am a Civic Assistant for the Community Hero platform. I can only assist with reporting or resolving civic issues (like waste, potholes, water leaks). Let's stay focused on helping the community!`;
+        setChatMessages(prev => [...prev, { sender: 'bot', text: offTopicText }]);
+        return;
+      }
+
+      // Greetings
+      const greetings = ['hello', 'hi', 'hey', 'hlo', 'hola', 'namaste', 'नमस्ते', 'नमस्कार'];
+      if (greetings.some(g => lowerText === g || lowerText.startsWith(g))) {
+        const reply = isHi
+          ? `नमस्ते! मैं आपका नागरिक सहायक हूँ। आप किस नागरिक समस्या (सड़क के गड्ढे, कचरा, पानी का रिसाव आदि) की रिपोर्ट करना चाहते हैं?`
+          : `Hello! I am your AI Civic Assistant. What local civic issue would you like to report today?`;
+        setChatMessages(prev => [...prev, { sender: 'bot', text: reply }]);
+        return;
+      }
+
+      let currentDraft = { ...chatDraftReport };
+      if (!currentDraft.description) {
         let guessedCategory = 'Other';
-        const lowerTextDesc = text.toLowerCase();
-        if (lowerTextDesc.includes('pothole') || lowerTextDesc.includes('road') || lowerTextDesc.includes('gaddha') || lowerTextDesc.includes('road broken')) {
+        if (lowerText.includes('pothole') || lowerText.includes('road') || lowerText.includes('gaddha') || lowerText.includes('pavement')) {
           guessedCategory = 'Pothole';
-        } else if (lowerTextDesc.includes('garbage') || lowerTextDesc.includes('kuda') || lowerTextDesc.includes('trash') || lowerTextDesc.includes('waste')) {
+        } else if (lowerText.includes('garbage') || lowerText.includes('kuda') || lowerText.includes('trash') || lowerText.includes('waste')) {
           guessedCategory = 'Waste';
-        } else if (lowerTextDesc.includes('leak') || lowerTextDesc.includes('water') || lowerTextDesc.includes('pani') || lowerTextDesc.includes('pipe')) {
+        } else if (lowerText.includes('leak') || lowerText.includes('water') || lowerText.includes('pani') || lowerText.includes('pipe')) {
           guessedCategory = 'Water Leak';
-        } else if (lowerTextDesc.includes('broken') || lowerTextDesc.includes('light') || lowerTextDesc.includes('infrastructure')) {
+        } else if (lowerText.includes('broken') || lowerText.includes('light') || lowerText.includes('infrastructure')) {
           guessedCategory = 'Broken Infrastructure';
+        } else if (lowerText.includes('graffiti') || lowerText.includes('paint') || lowerText.includes('wall')) {
+          guessedCategory = 'Graffiti';
         }
-
-        setChatDraftReport(prev => ({ ...prev, description: text, category: guessedCategory }));
+        
+        currentDraft.description = text;
+        currentDraft.category = guessedCategory;
+        setChatDraftReport(currentDraft);
         setChatStep(1);
 
         const responseText = isHi
-          ? `मैंने विवरण नोट कर लिया है। मेरा अनुमान है कि श्रेणी "${guessedCategory}" है। क्या यह सही है या नीचे से चुनें:`
-          : `I've noted the description. I guessed the category is "${guessedCategory}". Is that correct, or select from below:`;
+          ? `विवरण: "${text}"। मैंने श्रेणी "${guessedCategory}" का अनुमान लगाया है। क्या यह सही है या नीचे से चुनें:`
+          : `Description: "${text}". I guessed the category is "${guessedCategory}". Is that correct, or select from below:`;
+        
+        setChatMessages(prev => [...prev, {
+          sender: 'bot',
+          text: responseText,
+          options: ['Pothole', 'Waste', 'Water Leak', 'Broken Infrastructure', 'Graffiti', 'Other']
+        }]);
+        return;
+      }
 
-        setChatMessages(prev => [
-          ...prev,
-          {
-            sender: 'bot',
-            text: responseText,
-            options: ['Pothole', 'Waste', 'Water Leak', 'Broken Infrastructure', 'Graffiti', 'Other']
-          }
-        ]);
-      } else if (chatStep === 1) {
-        // Step 1: Category validation
+      if (chatStep === 1) {
         const validCategories = ['pothole', 'waste', 'water leak', 'broken infrastructure', 'graffiti', 'other'];
-        const matchedCategory = validCategories.find(c => c === text.toLowerCase().trim() || text.toLowerCase().trim().includes(c));
-
-        if (!matchedCategory) {
+        const matched = validCategories.find(c => lowerText.includes(c));
+        if (matched) {
+          const categoryLabel = matched.charAt(0).toUpperCase() + matched.slice(1);
+          currentDraft.category = categoryLabel;
+          setChatDraftReport(currentDraft);
+          setChatStep(2);
+          
           const responseText = isHi
-            ? `कृपया समस्या का वर्गीकरण करने के लिए नीचे दिए गए विकल्पों में से एक वैध श्रेणी चुनें या टाइप करें:`
-            : `Please select a valid category from the options below or type it:`;
-          setChatMessages(prev => [
-            ...prev,
-            {
-              sender: 'bot',
-              text: responseText,
-              options: ['Pothole', 'Waste', 'Water Leak', 'Broken Infrastructure', 'Graffiti', 'Other']
-            }
-          ]);
-          return;
-        }
-
-        // Map text to clean category label
-        const categoryLabel = text.charAt(0).toUpperCase() + text.slice(1);
-        setChatDraftReport(prev => ({ ...prev, category: categoryLabel }));
-        setChatStep(2);
-
-        const responseText = isHi
-          ? `श्रेणी: ${categoryLabel}। गंभीरता का स्तर क्या है?`
-          : `Category: ${categoryLabel}. What is the severity level?`;
-
-        setChatMessages(prev => [
-          ...prev,
-          {
+            ? `श्रेणी: ${categoryLabel}। गंभीरता क्या है?`
+            : `Category: ${categoryLabel}. What is the severity level?`;
+          
+          setChatMessages(prev => [...prev, {
             sender: 'bot',
             text: responseText,
             options: isHi ? ['सामान्य (Minor)', 'मध्यम (Medium)', 'गंभीर (Severe)'] : ['Minor', 'Medium', 'Severe']
-          }
-        ]);
-      } else if (chatStep === 2) {
-        // Step 2: Severity validation
+          }]);
+        } else {
+          const responseText = isHi
+            ? `कृपया नीचे से एक वैध श्रेणी चुनें:`
+            : `Please select a valid category from below:`;
+          setChatMessages(prev => [...prev, {
+            sender: 'bot',
+            text: responseText,
+            options: ['Pothole', 'Waste', 'Water Leak', 'Broken Infrastructure', 'Graffiti', 'Other']
+          }]);
+        }
+        return;
+      }
+
+      if (chatStep === 2) {
         const severityMapping: Record<string, string> = {
-          'सामान्य (Minor)': 'Minor',
-          'मध्यम (Medium)': 'Medium',
-          'गंभीर (Severe)': 'Severe',
           'minor': 'Minor',
           'medium': 'Medium',
-          'severe': 'Severe'
+          'severe': 'Severe',
+          'सामान्य': 'Minor',
+          'मध्यम': 'Medium',
+          'गंभीर': 'Severe'
         };
-        
-        let mappedSeverity = null;
-        for (const [key, value] of Object.entries(severityMapping)) {
-          if (text.toLowerCase().trim().includes(key.toLowerCase())) {
-            mappedSeverity = value;
+        let mapped = null;
+        for (const [k, v] of Object.entries(severityMapping)) {
+          if (lowerText.includes(k)) {
+            mapped = v;
             break;
           }
         }
-        if (!mappedSeverity) {
-          mappedSeverity = severityMapping[text] || null;
-        }
+        if (mapped) {
+          currentDraft.severity = mapped;
+          setChatDraftReport(currentDraft);
+          setChatStep(3);
 
-        if (!mappedSeverity) {
+          const responseText = isHi
+            ? `स्थान दर्ज करें। कृपया शहर और कॉलोनी का नाम बताएं (जैसे: Bharatpur, Subhash Nagar) या '📍 लाइव स्थान साझा करें' बटन दबाएं:`
+            : `Please enter the location. Provide the City and Colony/Area name (e.g., Bharatpur, Subhash Nagar) or click '📍 Attach Live Location':`;
+          setChatMessages(prev => [...prev, { sender: 'bot', text: responseText }]);
+        } else {
           const responseText = isHi
             ? `कृपया एक वैध गंभीरता स्तर (Minor, Medium, Severe) चुनें:`
-            : `Please select or type a valid severity level (Minor, Medium, or Severe):`;
-          setChatMessages(prev => [
-            ...prev,
-            {
-              sender: 'bot',
-              text: responseText,
-              options: isHi ? ['सामान्य (Minor)', 'मध्यम (Medium)', 'गंभीर (Severe)'] : ['Minor', 'Medium', 'Severe']
-            }
-          ]);
-          return;
-        }
-
-        setChatDraftReport(prev => ({ ...prev, severity: mappedSeverity }));
-        setChatStep(3);
-
-        const responseText = isHi
-          ? `स्थान दर्ज करें। कृपया शहर और कॉलोनी का नाम बताएं (जैसे: Bharatpur, Subhash Nagar) या '📍 लाइव स्थान साझा करें' बटन पर क्लिक करें:`
-          : `Please enter the location. Provide the City and Colony/Area name (e.g., Bharatpur, Subhash Nagar) or click '📍 Attach Live Location':`;
-
-        setChatMessages(prev => [
-          ...prev,
-          {
+            : `Please select a valid severity level (Minor, Medium, or Severe):`;
+          setChatMessages(prev => [...prev, {
             sender: 'bot',
-            text: responseText
-          }
-        ]);
-      } else if (chatStep === 3) {
-        // Step 3: Location resolution
+            text: responseText,
+            options: isHi ? ['सामान्य (Minor)', 'मध्यम (Medium)', 'गंभीर (Severe)'] : ['Minor', 'Medium', 'Severe']
+          }]);
+        }
+        return;
+      }
+
+      if (chatStep === 3) {
         let lat = 28.6139;
         let lon = 77.2090;
         let locationQuery = text;
-        let isCoordsParsed = false;
+        let isCoords = false;
 
         const match = text.match(coordsRegex);
         if (match) {
           lat = parseFloat(match[1]);
           lon = parseFloat(match[2]);
           locationQuery = `Coordinates (${lat.toFixed(5)}, ${lon.toFixed(5)})`;
-          isCoordsParsed = true;
+          isCoords = true;
         }
 
-        // If coordinates were already captured in draft location share
-        if (!isCoordsParsed && chatDraftReport.latitude && chatDraftReport.longitude) {
-          lat = chatDraftReport.latitude;
-          lon = chatDraftReport.longitude;
+        if (!isCoords && currentDraft.latitude && currentDraft.longitude) {
+          lat = currentDraft.latitude;
+          lon = currentDraft.longitude;
           locationQuery = `Coordinates (${lat.toFixed(5)}, ${lon.toFixed(5)})`;
-          isCoordsParsed = true;
+          isCoords = true;
         }
 
-        if (!isCoordsParsed) {
+        if (!isCoords) {
           const loadingMsg = isHi
             ? `स्थान "${locationQuery}" को खोजा जा रहा है...`
             : `Resolving location coordinates for "${locationQuery}"...`;
-
           setChatMessages(prev => [...prev, { sender: 'bot', text: loadingMsg }]);
-
           try {
-            const response = await fetch(
-              `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationQuery)}&countrycodes=in&limit=1`
-            );
-            const results = await response.json();
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locationQuery)}&countrycodes=in&limit=1`);
+            const results = await res.json();
             if (results && results.length > 0) {
               lat = parseFloat(results[0].lat);
               lon = parseFloat(results[0].lon);
             }
-          } catch (err) {
-            console.error('OSM Geocoding failed inside chatbot', err);
+          } catch (e) {
+            console.error(e);
           }
         }
 
-        // Validate coordinates are in India
         if (!isWithinIndia(lat, lon)) {
           const failText = isHi
-            ? `क्षमा करें, हम केवल भारत के भीतर की समस्याओं का समर्थन करते हैं। कृपया भारत में एक वैध स्थान प्रदान करें:`
+            ? `हम केवल भारत के भीतर की समस्याओं का समर्थन करते हैं। कृपया भारत में एक वैध स्थान प्रदान करें:`
             : `Sorry, we only support civic issues within India. Please provide a valid location in India:`;
           setChatMessages(prev => [...prev, { sender: 'bot', text: failText }]);
           return;
@@ -1088,8 +1229,8 @@ export default function App() {
 
         const newReport: IssueReport = {
           id: `report-${Date.now()}`,
-          category: chatDraftReport.category || 'Other',
-          severity: chatDraftReport.severity || 'Medium',
+          category: currentDraft.category || 'Other',
+          severity: currentDraft.severity || 'Medium',
           status: 'Reported',
           latitude: lat,
           longitude: lon,
@@ -1098,7 +1239,7 @@ export default function App() {
           upvotes: 1,
           downvotes: 0,
           created_at: new Date().toISOString(),
-          description: chatDraftReport.description || '',
+          description: currentDraft.description || '',
           colony_area: locationQuery.replace(/📍/g, '').trim(),
           reporter_name: currentUser?.name || 'citizen',
           comments: []
@@ -1116,10 +1257,7 @@ export default function App() {
           ? `रिपोर्ट सफलतापूर्वक दर्ज की गई! मैंने इसे नक्शे पर पिन कर दिया है। (पिन स्थान: ${lat.toFixed(4)}, ${lon.toFixed(4)})`
           : `Report filed successfully! I have pinned the issue to the map at ${lat.toFixed(4)}, ${lon.toFixed(4)}.`;
 
-        setChatMessages(prev => [
-          ...prev,
-          { sender: 'bot', text: successText }
-        ]);
+        setChatMessages(prev => [...prev, { sender: 'bot', text: successText }]);
       }
     }, 600);
   };
@@ -2059,11 +2197,47 @@ export default function App() {
                           <Globe className="h-3 w-3" />
                           <span>{chatbotLanguage === 'EN' ? 'HINDI' : 'ENGLISH'}</span>
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsChatSettingsOpen(prev => !prev)}
+                          className={`p-1 rounded-lg hover:bg-zinc-800 transition-all cursor-pointer ${isChatSettingsOpen ? 'text-amber-400' : 'text-zinc-400 hover:text-white'}`}
+                          title="AI Settings"
+                        >
+                          <Settings className="h-4 w-4" />
+                        </button>
                         <button onClick={() => setIsChatOpen(false)} className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white transition-all cursor-pointer">
                           <X className="h-4 w-4" />
                         </button>
                       </div>
                     </div>
+                    {isChatSettingsOpen && (
+                      <div className="p-4 bg-zinc-105 border-b border-zinc-200 text-zinc-800 flex flex-col gap-2 flex-shrink-0 text-xs">
+                        <label className="font-extrabold uppercase text-[9px] text-zinc-500 tracking-wider">Configure Gemini API Key</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="password"
+                            placeholder="Enter Gemini API Key..."
+                            value={geminiApiKey}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setGeminiApiKey(val);
+                              localStorage.setItem('gemini_api_key', val);
+                            }}
+                            className="flex-1 bg-white border border-zinc-300 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-black font-mono text-zinc-900"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setIsChatSettingsOpen(false)}
+                            className="bg-black hover:bg-zinc-800 text-white px-3 py-1 rounded-lg font-bold cursor-pointer text-[10px] uppercase tracking-wider transition-all"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <span className="text-[9px] text-zinc-500 font-semibold leading-normal">
+                          Leave empty to use built-in local smart simulation (AI mode behaves normally).
+                        </span>
+                      </div>
+                    )}
                     <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-zinc-50">
                       {chatMessages.map((msg: { sender: string; text: string; options?: string[] }, idx: number) => (
                         <div key={idx} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
