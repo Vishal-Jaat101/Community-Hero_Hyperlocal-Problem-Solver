@@ -183,7 +183,7 @@ const MOCK_REPORTS: IssueReport[] = [
     created_at: '2026-06-26T08:15:00Z',
     description: 'Large municipal pipeline burst. Water flooding street.',
     colony_area: 'MG Road Metro Station, Bangalore',
-    reporter_name: 'citizen',
+    reporter_name: 'Priya Sharma',
     comments: [
       { author: 'Priya Nair', text: 'Clean-up complete, water shut-off resolved.', created_at: '2026-06-26T16:00:00Z' }
     ]
@@ -202,7 +202,7 @@ const MOCK_REPORTS: IssueReport[] = [
     created_at: '2026-06-27T16:10:00Z',
     description: 'Streetlight pole tilted and sparking.',
     colony_area: 'Subhash Nagar, Jaipur',
-    reporter_name: 'citizen',
+    reporter_name: 'Vikram Singh',
     comments: []
   }
 ];
