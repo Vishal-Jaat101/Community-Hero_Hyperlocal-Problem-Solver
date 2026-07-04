@@ -22,7 +22,10 @@ import {
   Building2,
   Landmark,
   Globe,
-  Gift
+  Gift,
+  Edit3,
+  Save,
+  FileText
 } from 'lucide-react';
 import maplibregl from 'maplibre-gl';
 import { io, Socket } from 'socket.io-client';
@@ -63,6 +66,7 @@ interface IssueReport {
   comments: Comment[];
   description?: string;
   colony_area?: string; // New field for colonies (e.g. Subhash Nagar, Bharatpur)
+  reporter_name?: string; // New field to match reports with their creator
 }
 
 interface LeaderboardUser {
@@ -95,6 +99,30 @@ interface OngoingRepair {
   status: string;
 }
 
+const MOCK_TOP_PERFORMERS = {
+  sector: [
+    { rank: 1, name: "Sector 15, Noida", rate: "94%", count: "128 resolved / 136 total" },
+    { rank: 2, name: "Connaught Place, New Delhi", rate: "89%", count: "245 resolved / 275 total" },
+    { rank: 3, name: "HSR Layout, Bengaluru", rate: "85%", count: "198 resolved / 233 total" },
+    { rank: 4, name: "Salt Lake Sector V, Kolkata", rate: "81%", count: "142 resolved / 175 total" },
+    { rank: 5, name: "Gachibowli, Hyderabad", rate: "79%", count: "310 resolved / 392 total" },
+  ],
+  city: [
+    { rank: 1, name: "Indore, Madhya Pradesh", rate: "96%", count: "2,450 resolved / 2,552 total" },
+    { rank: 2, name: "Surat, Gujarat", rate: "92%", count: "3,120 resolved / 3,391 total" },
+    { rank: 3, name: "Navi Mumbai, Maharashtra", rate: "90%", count: "1,890 resolved / 2,100 total" },
+    { rank: 4, name: "Ambikapur, Chhattisgarh", rate: "88%", count: "780 resolved / 886 total" },
+    { rank: 5, name: "Mysuru, Karnataka", rate: "87%", count: "1,240 resolved / 1,425 total" },
+  ],
+  state: [
+    { rank: 1, name: "Sikkim", rate: "95%", count: "3,890 resolved / 4,095 total" },
+    { rank: 2, name: "Goa", rate: "91%", count: "5,120 resolved / 5,626 total" },
+    { rank: 3, name: "Himachal Pradesh", rate: "88%", count: "12,450 resolved / 14,148 total" },
+    { rank: 4, name: "Gujarat", rate: "86%", count: "48,900 resolved / 56,860 total" },
+    { rank: 5, name: "Tamil Nadu", rate: "84%", count: "62,310 resolved / 74,178 total" },
+  ]
+};
+
 // --- Initial Test Users ---
 const INITIAL_USERS: AppUser[] = [
   { id: 'user-1', name: 'Rahul Sharma', email: 'citizen@test.com', password: 'test123', role: 'citizen' },
@@ -118,6 +146,7 @@ const MOCK_REPORTS: IssueReport[] = [
     created_at: '2026-06-27T10:30:00Z',
     description: 'Deep pothole causing accidents near CP block B.',
     colony_area: 'Connaught Place, New Delhi',
+    reporter_name: 'Rahul Sharma',
     comments: [
       { author: 'Rahul Sharma', text: 'Almost broke my axle here this morning. Be careful!', created_at: '2026-06-27T11:00:00Z' },
       { author: 'NDMC Inspector', text: 'Report routed to road maintenance crew.', created_at: '2026-06-27T12:15:00Z' }
@@ -137,6 +166,7 @@ const MOCK_REPORTS: IssueReport[] = [
     created_at: '2026-06-27T14:20:00Z',
     description: 'Illegal dumping of plastic bags near Juhu shoreline.',
     colony_area: 'Juhu Scheme, Mumbai',
+    reporter_name: 'Rahul Sharma',
     comments: []
   },
   {
@@ -153,6 +183,7 @@ const MOCK_REPORTS: IssueReport[] = [
     created_at: '2026-06-26T08:15:00Z',
     description: 'Large municipal pipeline burst. Water flooding street.',
     colony_area: 'MG Road Metro Station, Bangalore',
+    reporter_name: 'citizen',
     comments: [
       { author: 'Priya Nair', text: 'Clean-up complete, water shut-off resolved.', created_at: '2026-06-26T16:00:00Z' }
     ]
@@ -171,6 +202,7 @@ const MOCK_REPORTS: IssueReport[] = [
     created_at: '2026-06-27T16:10:00Z',
     description: 'Streetlight pole tilted and sparking.',
     colony_area: 'Subhash Nagar, Jaipur',
+    reporter_name: 'citizen',
     comments: []
   }
 ];
@@ -250,7 +282,6 @@ export default function App() {
   const [filterCategory, setFilterCategory] = useState<string>('All');
   const [filterStatus, setFilterStatus] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [isWsConnected, setIsWsConnected] = useState<boolean>(false);
   const [showBlurOriginal, setShowBlurOriginal] = useState<boolean>(false);
   const [commentInput, setCommentInput] = useState<string>('');
   const [votedReports, setVotedReports] = useState<Set<string>>(new Set());
@@ -282,6 +313,23 @@ export default function App() {
 
   // --- Resolution State ---
   const [resolvePhoto, setResolvePhoto] = useState<string | null>(null);
+
+  // --- Profile State ---
+  const [isProfileOpen, setIsProfileOpen] = useState<boolean>(false);
+  const [isEditingProfile, setIsEditingProfile] = useState<boolean>(false);
+  const [profileName, setProfileName] = useState<string>('');
+  const [profileEmail, setProfileEmail] = useState<string>('');
+
+  // --- Leaderboard Section 2 State ---
+  const [topPerformersType, setTopPerformersType] = useState<'sector' | 'city' | 'state'>('sector');
+
+  // Sync profile editing fields when modal opens or user changes
+  useEffect(() => {
+    if (currentUser) {
+      setProfileName(currentUser.name);
+      setProfileEmail(currentUser.email);
+    }
+  }, [currentUser, isProfileOpen]);
 
   // --- Refs ---
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -412,14 +460,6 @@ export default function App() {
       autoConnect: true
     });
 
-    socketRef.current.on('connect', () => {
-      setIsWsConnected(true);
-    });
-
-    socketRef.current.on('disconnect', () => {
-      setIsWsConnected(false);
-    });
-
     socketRef.current.on('map_update', (newReport: any) => {
       setReports((prev) => [newReport, ...prev]);
     });
@@ -501,14 +541,21 @@ export default function App() {
       },
       center: [78.9629, 20.5937],
       zoom: 5,
+      maxZoom: 18,
       maxBounds: [[65.0, 5.0], [100.0, 40.0]]
     });
 
     map.current.addControl(new maplibregl.NavigationControl(), 'top-right');
 
     map.current.on('click', (e: any) => {
-      setFormLatitude(e.lngLat.lat.toFixed(5));
-      setFormLongitude(e.lngLat.lng.toFixed(5));
+      const lat = e.lngLat.lat;
+      const lon = e.lngLat.lng;
+      if (lat >= 5.0 && lat <= 40.0 && lon >= 65.0 && lon <= 100.0) {
+        setFormLatitude(lat.toFixed(5));
+        setFormLongitude(lon.toFixed(5));
+      } else {
+        alert('Please select a location within India.');
+      }
     });
 
     map.current.on('load', () => {
@@ -600,12 +647,46 @@ export default function App() {
     }
   };
 
+  const isWithinIndia = (lat: number, lon: number) => {
+    return lat >= 5.0 && lat <= 40.0 && lon >= 65.0 && lon <= 100.0;
+  };
+
+  const handleShareLiveLocation = () => {
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by your browser.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        if (!isWithinIndia(latitude, longitude)) {
+          alert('We only support civic issues within India. Please share a valid location in India.');
+          return;
+        }
+        setFormLatitude(latitude.toString());
+        setFormLongitude(longitude.toString());
+        
+        if (map.current) {
+          map.current.flyTo({ center: [longitude, latitude], zoom: 15 });
+        }
+      },
+      (error) => {
+        alert('Unable to retrieve your location. Please check your location services and try again.');
+        console.error('Geolocation error:', error);
+      }
+    );
+  };
+
   const handleCreateReport = (e: React.FormEvent) => {
     e.preventDefault();
     const lat = parseFloat(formLatitude);
     const lon = parseFloat(formLongitude);
     if (isNaN(lat) || isNaN(lon)) {
-      alert('Please enter valid coordinates or click on the map.');
+      alert('Please share your live location or click on the map to confirm coordinates.');
+      return;
+    }
+    if (!isWithinIndia(lat, lon)) {
+      alert('We only support civic issues within India. Please select a location in India.');
       return;
     }
     const defaultPhoto = 'https://images.unsplash.com/photo-1599740831464-5eecfa64b8a5?auto=format&fit=crop&w=800&q=80';
@@ -624,6 +705,7 @@ export default function App() {
       created_at: new Date().toISOString(),
       description: formDescription,
       colony_area: formColonyArea || 'Unknown Area',
+      reporter_name: currentUser?.name || 'citizen',
       comments: []
     };
     setReports((prev) => [newReport, ...prev]);
@@ -1077,10 +1159,10 @@ export default function App() {
 
             {authMode === 'login' && (
               <div className="mt-6 pt-4 border-t border-zinc-800">
-                {import.meta.env.MODE !== 'production' ? (
+                {import.meta.env.MODE !== 'production' && (
                   <>
                     <p className="text-[9px] text-zinc-600 uppercase font-bold tracking-wider mb-2">Quick Test Accounts (password: test123)</p>
-                    <div className="space-y-1.5">
+                    <div className="space-y-1.5 mb-3">
                       {[
                         { email: 'citizen@test.com', label: '🏠 Citizen', color: 'text-zinc-400' },
                         { email: 'company@test.com', label: '🏢 Company', color: 'text-blue-400' },
@@ -1098,15 +1180,24 @@ export default function App() {
                       ))}
                     </div>
                   </>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => { setAuthEmail(''); setAuthPassword(''); }}
-                    className="w-full text-center text-zinc-500 text-xs font-bold py-2 hover:text-white transition-all cursor-pointer"
-                  >
-                    Browse Anonymously as Guest →
-                  </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const guestUser: AppUser = {
+                      id: `guest-${Date.now()}`,
+                      name: 'citizen',
+                      email: 'guest@communityhero.org',
+                      password: '',
+                      role: 'citizen'
+                    };
+                    setCurrentUser(guestUser);
+                    localStorage.setItem('communityHero_currentUser', JSON.stringify(guestUser));
+                  }}
+                  className="w-full text-center text-zinc-500 text-xs font-bold py-2 hover:text-white transition-all cursor-pointer"
+                >
+                  Browse Anonymously as Guest →
+                </button>
               </div>
             )}
           </div>
@@ -1120,6 +1211,179 @@ export default function App() {
   // ==========================================
   return (
     <div className="flex flex-col h-screen bg-white text-zinc-900 overflow-hidden">
+      {/* --- Profile Modal --- */}
+      {isProfileOpen && currentUser && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 z-[999]">
+          <div className="w-full max-w-xl bg-white rounded-3xl overflow-hidden shadow-2xl border border-zinc-200 text-zinc-900 flex flex-col max-h-[85vh]">
+            {/* Header */}
+            <div className="p-5 border-b border-zinc-200 flex items-center justify-between bg-zinc-50 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <User className="h-5 w-5 text-black" />
+                <h2 className="text-sm font-black uppercase tracking-wider text-black m-0">My Civic Profile</h2>
+              </div>
+              <button
+                onClick={() => { setIsProfileOpen(false); setIsEditingProfile(false); }}
+                className="p-1.5 rounded-xl hover:bg-zinc-100 text-zinc-500 hover:text-black transition-all cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Content Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* Profile Card */}
+              <div className="bg-zinc-50 border border-zinc-200 rounded-2xl p-5 relative">
+                <div className="absolute top-4 right-4">
+                  {!isEditingProfile ? (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingProfile(true)}
+                      className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-zinc-600 hover:text-black transition-all border border-zinc-300 rounded-lg px-2.5 py-1.5 cursor-pointer bg-white"
+                    >
+                      <Edit3 className="h-3 w-3" />
+                      Edit
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsEditingProfile(false);
+                        setProfileName(currentUser.name);
+                        setProfileEmail(currentUser.email);
+                      }}
+                      className="text-xs text-zinc-500 font-bold hover:underline cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-12 h-12 rounded-full flex items-center justify-center text-sm font-bold text-white ${
+                      currentUser.role === 'government' ? 'bg-amber-600' : currentUser.role === 'company' ? 'bg-blue-600' : 'bg-zinc-700'
+                    }`}>
+                      {profileName.split(' ').map(n => n[0]).join('')}
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-extrabold text-black m-0">{currentUser.name}</h3>
+                      <span className={`inline-block text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border mt-1 ${getRoleBadgeColor(currentUser.role)}`}>
+                        {currentUser.role}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-zinc-150">
+                    <div>
+                      <span className="text-[9px] text-zinc-400 font-black uppercase tracking-wider">Full Name</span>
+                      {isEditingProfile ? (
+                        <input
+                          type="text"
+                          value={profileName}
+                          onChange={(e) => setProfileName(e.target.value)}
+                          className="w-full bg-white border border-zinc-300 rounded-lg px-3 py-1.5 text-xs text-zinc-900 font-bold focus:outline-none focus:border-black mt-1"
+                        />
+                      ) : (
+                        <p className="text-xs font-bold text-zinc-800 m-0 mt-0.5">{currentUser.name}</p>
+                      )}
+                    </div>
+                    <div>
+                      <span className="text-[9px] text-zinc-400 font-black uppercase tracking-wider">Email Address</span>
+                      {isEditingProfile ? (
+                        <input
+                          type="email"
+                          value={profileEmail}
+                          onChange={(e) => setProfileEmail(e.target.value)}
+                          className="w-full bg-white border border-zinc-300 rounded-lg px-3 py-1.5 text-xs text-zinc-900 font-bold focus:outline-none focus:border-black mt-1"
+                        />
+                      ) : (
+                        <p className="text-xs font-bold text-zinc-800 m-0 mt-0.5">{currentUser.email}</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Save Button (renders only when user changes something) */}
+                  {isEditingProfile && (profileName !== currentUser.name || profileEmail !== currentUser.email) && (
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updatedUser = { ...currentUser, name: profileName, email: profileEmail };
+                          setCurrentUser(updatedUser);
+                          
+                          // Also update the user in mockUsers
+                          const updatedUsers = mockUsers.map(u => u.id === currentUser.id ? updatedUser : u);
+                          setMockUsers(updatedUsers);
+                          localStorage.setItem('communityHero_users', JSON.stringify(updatedUsers));
+                          localStorage.setItem('communityHero_currentUser', JSON.stringify(updatedUser));
+                          
+                          setIsEditingProfile(false);
+                        }}
+                        className="flex items-center gap-1.5 bg-black hover:bg-zinc-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-2 rounded-xl transition-all cursor-pointer"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        Save Changes
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* User's Reports Section */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-1.5">
+                  <FileText className="h-4 w-4 text-black" />
+                  <h3 className="text-xs font-black uppercase tracking-wider text-black m-0">My Filed Reports</h3>
+                </div>
+
+                <div className="space-y-2">
+                  {reports.filter(r => r.reporter_name === currentUser.name).length === 0 ? (
+                    <div className="text-center py-8 bg-zinc-50 border border-zinc-200 border-dashed rounded-2xl text-zinc-405 text-xs font-semibold">
+                      You haven't filed any reports yet. Reports you file will appear here.
+                    </div>
+                  ) : (
+                    reports.filter(r => r.reporter_name === currentUser.name).map(report => (
+                      <div
+                        key={report.id}
+                        onClick={() => {
+                          setSelectedReport(report);
+                          setIsProfileOpen(false);
+                        }}
+                        className="p-3 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 hover:border-zinc-300 rounded-xl transition-all flex justify-between items-center cursor-pointer text-left"
+                      >
+                        <div className="min-w-0 flex-1 pr-2">
+                          <span className="text-[10px] font-black uppercase text-black block">{report.category}</span>
+                          <span className="text-[9px] text-zinc-500 font-semibold block mt-0.5 truncate">{report.description}</span>
+                          <span className="text-[8px] text-zinc-400 font-bold block mt-0.5">{report.colony_area || 'Unknown'} • {new Date(report.created_at).toLocaleDateString()}</span>
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          {getStatusBadge(report.status)}
+                          <span className="text-xs text-zinc-400">→</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer: Red Logout option */}
+            <div className="p-4 border-t border-zinc-200 bg-zinc-50 flex justify-center flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsProfileOpen(false);
+                  handleLogout();
+                }}
+                className="w-full py-3 bg-red-600 hover:bg-red-700 hover:shadow-md text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all cursor-pointer flex items-center justify-center gap-2 font-bold"
+              >
+                <LogOut className="h-4 w-4" />
+                Logout Account
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* --- Top Navbar --- */}
       <header className="glass sticky top-0 z-50 px-6 py-4 flex items-center justify-between border-b border-zinc-200">
         <div className="flex items-center gap-3">
@@ -1163,11 +1427,11 @@ export default function App() {
         </nav>
 
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 bg-zinc-100 border border-zinc-200 px-3 py-1.5 rounded-full text-xs">
-            <span className={`w-2 h-2 rounded-full ${isWsConnected ? 'bg-zinc-900 animate-pulse' : 'bg-zinc-400'}`} />
-            <span className="text-zinc-600 font-semibold">{isWsConnected ? 'Live' : 'Simulation'}</span>
-          </div>
-          <div className="flex items-center gap-2 bg-zinc-100 border border-zinc-200 px-3 py-1.5 rounded-full text-xs">
+          <button
+            type="button"
+            onClick={() => setIsProfileOpen(true)}
+            className="flex items-center gap-2 bg-zinc-100 hover:bg-zinc-200 border border-zinc-200 px-3 py-1.5 rounded-full text-xs cursor-pointer transition-all"
+          >
             <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-white ${
               currentUser.role === 'government' ? 'bg-amber-600' : currentUser.role === 'company' ? 'bg-blue-600' : 'bg-zinc-700'
             }`}>
@@ -1177,13 +1441,6 @@ export default function App() {
             <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${getRoleBadgeColor(currentUser.role)}`}>
               {currentUser.role}
             </span>
-          </div>
-          <button
-            onClick={handleLogout}
-            className="p-2 rounded-xl hover:bg-zinc-100 text-zinc-500 hover:text-black transition-all cursor-pointer"
-            title="Logout"
-          >
-            <LogOut className="h-4 w-4" />
           </button>
         </div>
       </header>
@@ -1266,13 +1523,26 @@ export default function App() {
                   <div className="space-y-2 bg-zinc-100 p-3 rounded-xl border border-zinc-200">
                     <div className="flex items-center gap-1.5 text-[10px] text-zinc-600 font-bold uppercase tracking-wider">
                       <MapPin className="h-3.5 w-3.5 text-zinc-900" />
-                      <span>Map Location Coordinates</span>
+                      <span>Report Location</span>
                     </div>
-                    <p className="text-[10px] text-zinc-500 font-medium">Click anywhere on the map to pin coordinates.</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input type="text" placeholder="Latitude" value={formLatitude} onChange={(e) => setFormLatitude(e.target.value)} className="bg-white border border-zinc-300 rounded-lg px-2 py-1.5 text-xs text-zinc-900" />
-                      <input type="text" placeholder="Longitude" value={formLongitude} onChange={(e) => setFormLongitude(e.target.value)} className="bg-white border border-zinc-300 rounded-lg px-2 py-1.5 text-xs text-zinc-900" />
-                    </div>
+                    
+                    <button
+                      type="button"
+                      onClick={handleShareLiveLocation}
+                      className="w-full flex items-center justify-center gap-2 bg-black hover:bg-zinc-800 text-white text-xs font-bold py-2.5 rounded-xl transition-all cursor-pointer shadow-sm hover:shadow-md"
+                    >
+                      <MapPin className="h-4 w-4" />
+                      Share Live Location
+                    </button>
+                    
+                    {formLatitude && formLongitude ? (
+                      <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 mt-2">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                        <span>Location Confirmed ({parseFloat(formLatitude).toFixed(4)}, {parseFloat(formLongitude).toFixed(4)})</span>
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-zinc-500 font-semibold mt-1">Please share your live location or click on the map to confirm coordinates.</p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] text-zinc-500 uppercase font-black tracking-wider block">Add Photo</label>
@@ -1828,11 +2098,11 @@ export default function App() {
                     <div className="divide-y divide-zinc-200">
                       {MOCK_LEADERBOARDS[leaderboardFilter].map((user) => {
                         // Custom impact text mappings for each user
-                        let impactTxt = "🏆 Fixed 2 local issues | Active today";
-                        if (user.name === 'Arjun Patel') impactTxt = "🏆 Fixed 14 potholes this month | Active: 2h ago";
-                        else if (user.name === 'Priya Sharma') impactTxt = "🧹 Closed 8 garbage cleanups | Active: 1h ago";
-                        else if (user.name === 'Vikram Singh') impactTxt = "💧 Verified 6 water leaks | Active: 4h ago";
-                        else if (user.name === 'Ananya Gupta') impactTxt = "💡 Reported 3 broken streetlights | Active: yesterday";
+                        let impactTxt = "Verified 2 road reports";
+                        if (user.name === 'Arjun Patel') impactTxt = "Verified 14 broken infrastructure reports";
+                        else if (user.name === 'Priya Sharma') impactTxt = "Verified 8 garbage reports";
+                        else if (user.name === 'Vikram Singh') impactTxt = "Verified 6 water leak reports";
+                        else if (user.name === 'Ananya Gupta') impactTxt = "Verified 3 broken infrastructure reports";
 
                         return (
                           <div key={user.rank} className="grid grid-cols-12 p-4 py-5 items-center text-sm hover:bg-zinc-50/50 transition-all">
@@ -1865,7 +2135,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 30% Columns: Quests Sidebar & Trending Neighborhoods */}
+                {/* 30% Columns: Quests Sidebar */}
                 <div className="space-y-6">
                   {/* Active Challenges / Quests */}
                   <div className="bg-zinc-50 border border-zinc-200 rounded-3xl p-5 space-y-4 shadow-sm">
@@ -1909,33 +2179,59 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+                </div>
 
-                  {/* Trending Neighborhoods Sub-leaderboard */}
-                  <div className="bg-zinc-50 border border-zinc-200 rounded-3xl p-5 space-y-4 shadow-sm">
-                    <div>
-                      <h3 className="text-xs font-black uppercase text-black m-0 tracking-wider">Top Performing Sectors</h3>
-                      <p className="text-[9px] text-zinc-400 font-bold uppercase mt-0.5">Ranked by resolution rate</p>
-                    </div>
-                    <div className="space-y-2.5">
-                      {[
-                        { rank: 1, name: "Sector 15, Noida", rate: "94% Resolution Rate", status: "🥇 Rank 1", color: "bg-emerald-50 text-emerald-800 border-emerald-200" },
-                        { rank: 2, name: "Connaught Place, New Delhi", rate: "89% Resolution Rate", status: "🥈 Rank 2", color: "bg-zinc-100 text-zinc-800 border-zinc-200" },
-                        { rank: 3, name: "HSR Layout, Bengaluru", rate: "85% Resolution Rate", status: "🥉 Rank 3", color: "bg-zinc-100 text-zinc-800 border-zinc-200" }
-                      ].map((item, idx) => (
-                        <div key={idx} className="bg-white border border-zinc-200 rounded-2xl p-3 flex justify-between items-center shadow-xs">
-                          <div className="min-w-0">
-                            <h4 className="text-[10px] font-black text-black truncate uppercase leading-tight">{item.name}</h4>
-                            <span className="text-[9px] text-zinc-400 font-bold uppercase tracking-wider block mt-0.5">{item.rate}</span>
-                          </div>
-                          <span className={`text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded border flex-shrink-0 ${item.color}`}>
-                            {item.status}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+              </div>
+
+              {/* Section 2: Top Performers (Complete New Section in Leaderboard) */}
+              <div className="bg-white rounded-3xl p-6 border border-zinc-200 shadow-sm mt-8">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                  <div>
+                    <h3 className="text-lg font-black uppercase text-black font-sans tracking-tight">Top Performers</h3>
+                    <p className="text-xs text-zinc-500 font-semibold">Rankings by issue resolution rate and volume.</p>
+                  </div>
+                  <div className="flex items-center gap-1 bg-zinc-100 p-1 rounded-xl border border-zinc-200 self-start md:self-auto">
+                    {(['sector', 'city', 'state'] as const).map((type) => (
+                      <button
+                        key={type}
+                        onClick={() => setTopPerformersType(type)}
+                        className={`px-4 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                          topPerformersType === type ? 'bg-black text-white shadow-sm' : 'text-zinc-600 hover:text-black'
+                        }`}
+                      >
+                        {type}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
+                <div className="grid grid-cols-12 bg-zinc-50 p-4 border border-zinc-200 rounded-t-2xl text-[10px] font-black uppercase tracking-wider text-zinc-500">
+                  <div className="col-span-1 text-center">Rank</div>
+                  <div className="col-span-5">Name</div>
+                  <div className="col-span-4">Resolution Rate</div>
+                  <div className="col-span-2 text-right">Activity Volume</div>
+                </div>
+                <div className="divide-y divide-zinc-200 border-x border-b border-zinc-200 rounded-b-2xl overflow-hidden">
+                  {MOCK_TOP_PERFORMERS[topPerformersType].map((item) => (
+                    <div key={item.rank} className="grid grid-cols-12 p-4 py-5 items-center text-sm hover:bg-zinc-50/50 transition-all bg-white">
+                      <div className="col-span-1 text-center font-black text-zinc-500">
+                        {item.rank === 1 ? '🥇' : item.rank === 2 ? '🥈' : item.rank === 3 ? '🥉' : `#${item.rank}`}
+                      </div>
+                      <div className="col-span-5 font-extrabold text-black uppercase tracking-tight">
+                        {item.name}
+                      </div>
+                      <div className="col-span-4 flex items-center gap-3">
+                        <span className="font-mono font-bold text-black min-w-[36px]">{item.rate}</span>
+                        <div className="h-2 w-full max-w-[150px] bg-zinc-100 rounded-full overflow-hidden border border-zinc-200">
+                          <div className="h-full bg-emerald-500" style={{ width: item.rate }} />
+                        </div>
+                      </div>
+                      <div className="col-span-2 text-right text-xs text-zinc-500 font-bold">
+                        {item.count}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
