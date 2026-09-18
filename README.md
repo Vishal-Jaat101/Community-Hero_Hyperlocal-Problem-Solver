@@ -1,8 +1,20 @@
-# Community Hero (Hyperlocal Problem Solver)
+## Community Hero — AI-Powered Civic Infrastructure & Grievance Platform
 
-Community Hero is a crowdsourced, hyperlocal civic platform empowering citizens to report, validate, and track community infrastructure issues. By leveraging AI, geolocation, and gamification, the platform bridges the gap between residents, community advocates, and local authorities.
+> Built for the **1M1B AI for Sustainability Virtual Internship** (in collaboration with IBM SkillsBuild & AICTE).  
+> **Primary SDG:** UN Sustainable Development Goal 11 (Sustainable Cities and Communities)  
+> **Secondary SDG:** SDG 6 (Clean Water and Sanitation)
 
----
+## Overview
+Community Hero is an intelligent civic reporting platform combining interactive geospatial mapping (Mapbox GL) with multimodal AI triage to detect, prioritize, and route municipal infrastructure issues (water pipe bursts, road hazards, sanitation breakdowns).
+
+## AI Workflow
+1. **Multimodal Issue Classification:** Automated analysis of citizen-submitted descriptions and photos to categorize issue urgency and domain.
+2. **Automated Severity Scoring:** Priority indexing ensuring critical resource hazards (e.g., major water leaks) are escalated first.
+3. **Smart Radius De-duplication:** Clusters nearby duplicate reports into a single actionable dispatch ticket.
+
+## Responsible AI & Ethics
+- **Privacy First:** Automatic anonymization and redaction of personal identifiable imagery (faces, vehicle plates).
+- **Equitable Prioritization:** Severity-based issue scoring independent of neighborhood demographics.
 
 ## Architecture Blueprint
 
