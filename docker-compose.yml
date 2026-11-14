@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: community_hero
       POSTGRES_USER: hero_user
-      POSTGRES_PASSWORD: hero_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
       - "5432:5432"
     volumes:
@@ -40,7 +40,7 @@ services:
       - "15672:15672"     # Management Console UI
     environment:
       RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     restart: unless-stopped
@@ -57,7 +57,7 @@ services:
       - "9001:9001"       # Console port
     environment:
       MINIO_ROOT_USER: minio_admin
-      MINIO_ROOT_PASSWORD: minio_password
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     volumes:
       - minio_data:/data
     restart: unless-stopped
@@ -94,7 +94,7 @@ services:
     environment:
       DB_HOST: postgres
       REDIS_HOST: redis
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_URL: amqp://guest:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672
       MINIO_ENDPOINT: minio
     depends_on:
       - postgres
@@ -115,7 +115,7 @@ services:
     environment:
       DB_HOST: postgres
       REDIS_URL: redis://redis:6379/0
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_URL: amqp://guest:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672
       MINIO_ENDPOINT: minio
       CORE_WS_NOTIFY_URL: http://backend-core:3000/internal/notify
     depends_on:
